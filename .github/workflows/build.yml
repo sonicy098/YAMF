@@ -2,40 +2,31 @@ name: Build Android APK
 
 on:
   push:
-  #   branches: [ "main" ] # Sesuaikan branch utama Anda
-  # pull_request:
-  #   branches: [ "main" ]
-  workflow_dispatch: # Memungkinkan Anda mentrigger build manual dari tab Actions di GitHub
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # Menggunakan Ubuntu versi stabil terbaru
 
     steps:
-      # 1. Checkout repository kode Anda
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. Setup JDK 17 (Standar untuk Android Studio modern)
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5 # Diperbarui ke v5 untuk mengatasi peringatan deprecate
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 3. Setup Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4. Berikan izin eksekusi pada Gradle wrapper
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # 5. Build APK Debug (Atau gunakan assembleRelease jika sudah setup signing key)
       - name: Build Debug APK with Gradle
         run: ./gradlew assembleDebug
 
-      # 6. Upload file APK hasil build agar bisa didownload dari GitHub
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
