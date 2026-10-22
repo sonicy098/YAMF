@@ -134,12 +134,24 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     val key = XposedHelpers.getObjectField(task, "key")
                     val taskId = XposedHelpers.getIntField(key, "id")
                     
-                    // Ambil komponen aplikasi (Component Name)
-                    val topActivity = XposedHelpers.getObjectField(task, "topActivity")
-                    val componentName = if (topActivity != null) {
-                        ComponentName.unflattenFromString(topActivity.toString())
-                    } else null
-                    
+                    // Coba ambil topActivity dulu
+					var activityComponent = XposedHelpers.getObjectField(task, "topActivity")
+					
+					// Fallback ke realActivity atau baseIntent jika aplikasi mati suri
+					if (activityComponent == null) {
+					    activityComponent = XposedHelpers.getObjectField(task, "realActivity")
+					}
+					if (activityComponent == null) {
+					    val baseIntent = XposedHelpers.getObjectField(key, "baseIntent") as? Intent
+					    activityComponent = baseIntent?.component
+					}
+					
+					val componentName = if (activityComponent != null && activityComponent !is ComponentName) {
+					    ComponentName.unflattenFromString(activityComponent.toString())
+					} else {
+					    activityComponent as? ComponentName
+					}
+					
                     val userId = XposedHelpers.getIntField(key, "userId")
 
                     log(TAG, "Recents clicked Freeform request for taskId=$taskId")
