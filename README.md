@@ -20,6 +20,11 @@ YAMF 从 Mi-FreeForm 来的
 
 Yet Another [Mi-FreeForm](https://github.com/sunshine0523/Mi-FreeForm)
 
+for itel or transsion must activate :
+su
+settings put global enable_freeform_support 1
+settings put global force_resizable_activities 1
+
 因为 Mi-FreeForm 非常不好用 只好重写一个
 
 |                  |                   YAMF                    |           Mi-FreeForm            |
