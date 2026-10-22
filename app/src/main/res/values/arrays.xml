@@ -4,6 +4,7 @@
         <item>android</item>
         <item>com.motorola.launcher3</item>
         <item>com.android.launcher3</item>
+        <item>com.transsion.itel.launcher</item>
         <item>com.google.android.apps.nexuslauncher</item>
     </string-array>
 </resources>
