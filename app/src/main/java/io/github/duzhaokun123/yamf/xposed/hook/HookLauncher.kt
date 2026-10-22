@@ -102,70 +102,55 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private fun hookRecents(lpparam: XC_LoadPackage.LoadPackageParam) {
-        log(TAG, "hooking recents ${lpparam.packageName}")
-        XposedBridge.hookAllMethods(
-            XposedHelpers.findClass(
-                "com.android.quickstep.TaskOverlayFactory",
-                lpparam.classLoader
-            ), "getEnabledShortcuts", object : XC_MethodHook() {
-                @SuppressLint("UseCompatLoadingForDrawables")
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val taskView = param.args[0] as View
-                    val shortcuts = param.result as MutableList<Any>
-                    var itemInfo = XposedHelpers.getObjectField(shortcuts[0], "mItemInfo")
-                    itemInfo =
-                        itemInfo.javaClass.newInstance(args(itemInfo), argTypes(itemInfo.javaClass))
-                    val activity = taskView.context
-                    val task = XposedHelpers.callMethod(taskView, "getTask")
+        log(TAG, "hooking recents custom itel/transsion ${lpparam.packageName}")
+        
+        // Sesuaikan dengan nama handler click Recents yang terbukti bekerja di itel P55 5G
+        val handlerClass = XposedHelpers.findClassIfExists(
+            "com.android.quickstep.src.com.android.quickstep.z9\$h", 
+            lpparam.classLoader
+        ) ?: XposedHelpers.findClassIfExists(
+            "com.android.quickstep.z9\$h", 
+            lpparam.classLoader
+        ) ?: return
+
+        XposedBridge.hookAllMethods(handlerClass, "onClick", object : XC_MethodHook() {
+            override fun beforeHookedMethod(MethodHookParam param) {
+                // Batalkan aksi bawaan launcher agar tidak bentrok
+                param.result = null 
+                try {
+                    // Ambil Task ID secara dinamis dari struktur Recents itel
+                    val taskView = XposedHelpers.getObjectField(param.thisObject, "i")
+                    val task = XposedHelpers.getObjectField(taskView, "y")
                     val key = XposedHelpers.getObjectField(task, "key")
                     val taskId = XposedHelpers.getIntField(key, "id")
-                    val topComponent =
-                        XposedHelpers.callMethod(itemInfo, "getTargetComponent") as ComponentName
+                    
+                    // Ambil komponen aplikasi (Component Name)
+                    val topActivity = XposedHelpers.getObjectField(task, "topActivity")
+                    val componentName = if (topActivity != null) {
+                        ComponentName.unflattenFromString(topActivity.toString())
+                    } else null
+                    
                     val userId = XposedHelpers.getIntField(key, "userId")
 
-                    val class_RemoteActionShortcut = XposedHelpers.findClass(
-                        "com.android.launcher3.popup.RemoteActionShortcut",
-                        lpparam.classLoader
-                    )
+                    log(TAG, "Recents clicked Freeform request for taskId=$taskId")
+
+                    // Lempar sinyal pembukaan Freeform langsung ke YAMF Manager Service
                     val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
                         setPackage("android")
                         putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
-                        putExtra(YAMFManager.EXTRA_COMPONENT_NAME, topComponent)
+                        if (componentName != null) {
+                            putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
+                        }
                         putExtra(YAMFManager.EXTRA_USER_ID, userId)
                         putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                     }
-                    val action = RemoteAction(
-                        Icon.createWithBitmap(
-                            moduleRes.getDrawable(R.drawable.ic_picture_in_picture_alt_24, null)
-                                .toBitmap()
-                        ),
-                        moduleRes.getString(R.string.open_with_yamf) + if (BuildConfig.DEBUG) " ($taskId)" else "",
-                        "",
-                        PendingIntent.getBroadcast(
-                            AndroidAppHelper.currentApplication(),
-                            1345,
-                            intent,
-                            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-                        )
-                    )
-                    val c = class_RemoteActionShortcut.constructors[0]
-                    val shortcut = when (c.parameterCount) {
-                        4 -> c.newInstance(action, activity, itemInfo, null)
-                        3 -> c.newInstance(action, activity, itemInfo)
-                        else -> {
-                            log(
-                                TAG,
-                                "unknown RemoteActionShortcut constructor: ${c.toGenericString()}"
-                            )
-                            null
-                        }
-                    }
+                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
 
-                    if (shortcut != null) {
-                        shortcuts.add(shortcut)
-                    }
+                } catch (e: Throwable) {
+                    log(TAG, "Gagal memicu Freeform YAMF dari Recents", e)
                 }
-            })
+            }
+        })
     }
 
     private fun hookTaskbar(lpparam: XC_LoadPackage.LoadPackageParam) {
