@@ -128,45 +128,53 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 // Batalkan aksi bawaan launcher agar tidak bentrok
                 param.result = null 
                 try {
-                    // Ambil Task ID secara dinamis dari struktur Recents itel
+                	// Ambil Task ID dan User ID
                     val taskView = XposedHelpers.getObjectField(param.thisObject, "i")
                     val task = XposedHelpers.getObjectField(taskView, "y")
                     val key = XposedHelpers.getObjectField(task, "key")
                     val taskId = XposedHelpers.getIntField(key, "id")
-                    
-                    // Coba ambil topActivity dulu
-					var activityComponent = XposedHelpers.getObjectField(task, "topActivity")
-					
-					// Fallback ke realActivity atau baseIntent jika aplikasi mati suri
-					if (activityComponent == null) {
-					    activityComponent = XposedHelpers.getObjectField(task, "realActivity")
-					}
-					if (activityComponent == null) {
-					    val baseIntent = XposedHelpers.getObjectField(key, "baseIntent") as? Intent
-					    activityComponent = baseIntent?.component
-					}
-					
-					val componentName = if (activityComponent != null && activityComponent !is ComponentName) {
-					    ComponentName.unflattenFromString(activityComponent.toString())
-					} else {
-					    activityComponent as? ComponentName
-					}
-					
                     val userId = XposedHelpers.getIntField(key, "userId")
+                    
+                    val topActivity = XposedHelpers.getObjectField(task, "topActivity")
 
-                    log(TAG, "Recents clicked Freeform request for taskId=$taskId")
-
-                    // Lempar sinyal pembukaan Freeform langsung ke YAMF Manager Service
-                    val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
-                        setPackage("android")
-                        putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
-                        if (componentName != null) {
+                    if (topActivity != null) {
+                        // KONDISI 1: APLIKASI MASIH HIDUP (ADA DI RAM)
+                        val componentName = ComponentName.unflattenFromString(topActivity.toString())
+                        
+                        val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
+                            setPackage("android")
+                            putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
                             putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
+                            putExtra(YAMFManager.EXTRA_USER_ID, userId)
+                            putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                         }
-                        putExtra(YAMFManager.EXTRA_USER_ID, userId)
-                        putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
+                        AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                        log(TAG, "YAMF: Mengirim task hidup ke Freeform (taskId=$taskId)")
+                        
+                    } else {
+                        // KONDISI 2: APLIKASI MATI SURI (MEMORI KOSONG)
+                        var deadComponent: ComponentName? = null
+                        
+                        val realActivity = XposedHelpers.getObjectField(task, "realActivity")
+                        if (realActivity != null) {
+                            deadComponent = ComponentName.unflattenFromString(realActivity.toString())
+                        } else {
+                            val baseIntent = XposedHelpers.getObjectField(key, "baseIntent") as? Intent
+                            deadComponent = baseIntent?.component
+                        }
+
+                        if (deadComponent != null) {
+                            // Minta YAMF melakukan StartActivity baru layaknya dari Pop-up Launcher
+                            val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
+                                setPackage("android")
+                                putExtra(YAMFManager.EXTRA_COMPONENT_NAME, deadComponent)
+                                putExtra(YAMFManager.EXTRA_USER_ID, userId)
+                                putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_POPUP) 
+                            }
+                            AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                            log(TAG, "YAMF: Membangunkan aplikasi mati suri ke Freeform ($deadComponent)")
+                        }
                     }
-                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
 
                 } catch (e: Throwable) {
                     log(TAG, "Gagal memicu Freeform YAMF dari Recents", e)
