@@ -124,7 +124,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
         log(TAG, "found itel Recents handler: ${handlerClass.name}")
 
         XposedBridge.hookAllMethods(handlerClass, "onClick", object : XC_MethodHook() {
-            override fun beforeHookedMethod(MethodHookParam param) {
+            override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
                 // Batalkan aksi bawaan launcher agar tidak bentrok
                 param.result = null 
                 try {
