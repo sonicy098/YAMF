@@ -133,9 +133,6 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     val taskId = XposedHelpers.getIntField(key, "id")
                     val userId = XposedHelpers.getIntField(key, "userId")
 
-                    // topActivity/realActivity pada model Task merupakan ComponentName.
-                    // Jangan parse ComponentName dari toString(): hasilnya biasanya
-                    // "ComponentInfo{package/class}" dan bukan format flattened yang valid.
                     val topActivity = runCatching {
                         XposedHelpers.getObjectField(task, "topActivity") as? ComponentName
                     }.getOrNull()
@@ -145,33 +142,24 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     val baseIntent = runCatching {
                         XposedHelpers.getObjectField(key, "baseIntent") as? Intent
                     }.getOrNull()
+                    
                     val componentName = topActivity ?: realActivity ?: baseIntent?.component
 
-                    // Abaikan fallback YAMF yang bermasalah di Transsion. 
-                    // Kita paksa menggunakan ACTION_OPEN_APP layaknya peluncuran dari App List/Popup
-                    // agar OS melakukan startActivity segar yang dijamin mengatasi blank screen.
+                    // Paksa YAMF menggunakan ACTION_OPEN_APP untuk melakukan cold-start 
+                    // agar aplikasi mati suri dirakit ulang oleh OS dari nol.
                     if (componentName != null) {
-                        val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
+                        val yamfIntent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
                             setPackage("android")
                             putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
                             putExtra(YAMFManager.EXTRA_USER_ID, userId)
                             putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                         }
-                        AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                        AndroidAppHelper.currentApplication().sendBroadcast(yamfIntent)
                         log(TAG, "YAMF Recents dipaksa ke Open App: component=$componentName userId=$userId")
                     } else {
-                        log(TAG, "WARNING: componentName tidak ditemukan, tidak dapat memicu startActivity.")
+                        log(TAG, "WARNING: componentName tidak ditemukan, jejak aplikasi sudah dihapus total oleh OS.")
                     }
 
-                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
-                    log(
-                        TAG,
-                        "YAMF Recents request: taskId=$taskId userId=$userId component=$componentName " +
-                            "topActivity=$topActivity realActivity=$realActivity"
-                    )
-                    if (componentName == null) {
-                        log(TAG, "WARNING: componentName unavailable; YAMF may not be able to fallback if moving task fails")
-                    }
                 } catch (e: Throwable) {
                     log(TAG, "Gagal memicu Freeform YAMF dari Recents", e)
                 }
