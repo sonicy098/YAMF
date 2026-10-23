@@ -107,8 +107,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private fun hookRecents(lpparam: XC_LoadPackage.LoadPackageParam) {
         log(TAG, "hooking recents custom itel/transsion ${lpparam.packageName}")
-        
-        // Sesuaikan dengan nama handler click Recents yang terbukti bekerja di itel P55 5G
+
         val handlerClass = XposedHelpers.findClassIfExists(
             "com.android.quickstep.src.com.android.quickstep.z9\$h",
             lpparam.classLoader
@@ -125,57 +124,51 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
 
         XposedBridge.hookAllMethods(handlerClass, "onClick", object : XC_MethodHook() {
             override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                // Batalkan aksi bawaan launcher agar tidak bentrok
-                param.result = null 
+                // YAMF akan menangani task yang dipilih; cegah aksi Freeform bawaan launcher.
+                param.result = null
                 try {
-                	// Ambil Task ID dan User ID
                     val taskView = XposedHelpers.getObjectField(param.thisObject, "i")
                     val task = XposedHelpers.getObjectField(taskView, "y")
                     val key = XposedHelpers.getObjectField(task, "key")
                     val taskId = XposedHelpers.getIntField(key, "id")
                     val userId = XposedHelpers.getIntField(key, "userId")
-                    
-                    val topActivity = XposedHelpers.getObjectField(task, "topActivity")
 
-                    if (topActivity != null) {
-                        // KONDISI 1: APLIKASI MASIH HIDUP (ADA DI RAM)
-                        val componentName = ComponentName.unflattenFromString(topActivity.toString())
-                        
-                        val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
-                            setPackage("android")
-                            putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
+                    // topActivity/realActivity pada model Task merupakan ComponentName.
+                    // Jangan parse ComponentName dari toString(): hasilnya biasanya
+                    // "ComponentInfo{package/class}" dan bukan format flattened yang valid.
+                    val topActivity = runCatching {
+                        XposedHelpers.getObjectField(task, "topActivity") as? ComponentName
+                    }.getOrNull()
+                    val realActivity = runCatching {
+                        XposedHelpers.getObjectField(task, "realActivity") as? ComponentName
+                    }.getOrNull()
+                    val baseIntent = runCatching {
+                        XposedHelpers.getObjectField(key, "baseIntent") as? Intent
+                    }.getOrNull()
+                    val componentName = topActivity ?: realActivity ?: baseIntent?.component
+
+                    // Jangan memakai topActivity sebagai indikator proses hidup/mati.
+                    // Task yang prosesnya sudah dibunuh masih dapat menyimpan metadata ini.
+                    // Kirim taskId + component + userId supaya jalur Recents YAMF dapat
+                    // mencoba memindahkan task, lalu melakukan fallback start bila diperlukan.
+                    val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
+                        setPackage("android")
+                        putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
+                        if (componentName != null) {
                             putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
-                            putExtra(YAMFManager.EXTRA_USER_ID, userId)
-                            putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                         }
-                        AndroidAppHelper.currentApplication().sendBroadcast(intent)
-                        log(TAG, "YAMF: Mengirim task hidup ke Freeform (taskId=$taskId)")
-                        
-                    } else {
-                        // KONDISI 2: APLIKASI MATI SURI (MEMORI KOSONG)
-                        var deadComponent: ComponentName? = null
-                        
-                        val realActivity = XposedHelpers.getObjectField(task, "realActivity")
-                        if (realActivity != null) {
-                            deadComponent = ComponentName.unflattenFromString(realActivity.toString())
-                        } else {
-                            val baseIntent = XposedHelpers.getObjectField(key, "baseIntent") as? Intent
-                            deadComponent = baseIntent?.component
-                        }
-
-                        if (deadComponent != null) {
-                            // Minta YAMF melakukan StartActivity baru layaknya dari Pop-up Launcher
-                            val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
-                                setPackage("android")
-                                putExtra(YAMFManager.EXTRA_COMPONENT_NAME, deadComponent)
-                                putExtra(YAMFManager.EXTRA_USER_ID, userId)
-                                putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_POPUP) 
-                            }
-                            AndroidAppHelper.currentApplication().sendBroadcast(intent)
-                            log(TAG, "YAMF: Membangunkan aplikasi mati suri ke Freeform ($deadComponent)")
-                        }
+                        putExtra(YAMFManager.EXTRA_USER_ID, userId)
+                        putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                     }
-
+                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                    log(
+                        TAG,
+                        "YAMF Recents request: taskId=$taskId userId=$userId component=$componentName " +
+                            "topActivity=$topActivity realActivity=$realActivity"
+                    )
+                    if (componentName == null) {
+                        log(TAG, "WARNING: componentName unavailable; YAMF may not be able to fallback if moving task fails")
+                    }
                 } catch (e: Throwable) {
                     log(TAG, "Gagal memicu Freeform YAMF dari Recents", e)
                 }
