@@ -147,19 +147,22 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     }.getOrNull()
                     val componentName = topActivity ?: realActivity ?: baseIntent?.component
 
-                    // Jangan memakai topActivity sebagai indikator proses hidup/mati.
-                    // Task yang prosesnya sudah dibunuh masih dapat menyimpan metadata ini.
-                    // Kirim taskId + component + userId supaya jalur Recents YAMF dapat
-                    // mencoba memindahkan task, lalu melakukan fallback start bila diperlukan.
-                    val intent = Intent(YAMFManager.ACTION_OPEN_IN_YAMF).apply {
-                        setPackage("android")
-                        putExtra(YAMFManager.EXTRA_TASK_ID, taskId)
-                        if (componentName != null) {
+                    // Abaikan fallback YAMF yang bermasalah di Transsion. 
+                    // Kita paksa menggunakan ACTION_OPEN_APP layaknya peluncuran dari App List/Popup
+                    // agar OS melakukan startActivity segar yang dijamin mengatasi blank screen.
+                    if (componentName != null) {
+                        val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
+                            setPackage("android")
                             putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
+                            putExtra(YAMFManager.EXTRA_USER_ID, userId)
+                            putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
                         }
-                        putExtra(YAMFManager.EXTRA_USER_ID, userId)
-                        putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_RECENTS)
+                        AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                        log(TAG, "YAMF Recents dipaksa ke Open App: component=$componentName userId=$userId")
+                    } else {
+                        log(TAG, "WARNING: componentName tidak ditemukan, tidak dapat memicu startActivity.")
                     }
+
                     AndroidAppHelper.currentApplication().sendBroadcast(intent)
                     log(
                         TAG,
