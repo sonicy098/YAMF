@@ -245,64 +245,139 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    // Objek bantuan untuk melacak tombol palsu kita di memori
+    object YamfShortcutManager {
+        var isHooked = false
+        val yamfShortcuts = java.util.concurrent.ConcurrentHashMap<Any, AppData>()
+        val yamfMInstances = java.util.concurrent.ConcurrentHashMap<Any, AppData>()
+
+        class AppData(val componentName: ComponentName, val userHandle: UserHandle?)
+
+        fun triggerYamf(appData: AppData) {
+            val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
+                setPackage("android")
+                putExtra(YAMFManager.EXTRA_COMPONENT_NAME, appData.componentName)
+                if (appData.userHandle != null) {
+                    putExtra(YAMFManager.EXTRA_USER_ID, appData.userHandle)
+                }
+                putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_POPUP)
+            }
+            AndroidAppHelper.currentApplication().sendBroadcast(intent)
+        }
+    }
+
     private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
+        private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
         log(TAG, "hooking Transsion custom popup ${lpparam.packageName}")
 
         val popupContainerClass = XposedHelpers.findClassIfExists(
             "com.transsion.xlauncher.popup.PopupContainer",
             lpparam.classLoader
-        )
+        ) ?: return
 
-        if (popupContainerClass == null) {
-            log(TAG, "Transsion PopupContainer class not found")
-            return
-        }
-
-        // Hook metode E(...) tempat daftar tombol SystemShortcutInfo dimasukkan
         XposedBridge.hookAllMethods(popupContainerClass, "E", object : XC_MethodHook() {
             @Suppress("UNCHECKED_CAST")
             override fun beforeHookedMethod(param: MethodHookParam) {
                 try {
-                    // Parameter ke-5 (index 4) adalah ComponentName aplikasi
                     val componentName = param.args[4] as? ComponentName
-                    // Parameter ke-3 (index 2) adalah ItemInfo (d5) untuk mengambil userId
                     val itemInfo = param.args[2]
-                    val userId = if (itemInfo != null) {
+                    val userHandle = if (itemInfo != null) {
                         runCatching { XposedHelpers.getObjectField(itemInfo, "user") as? UserHandle }.getOrNull()
                     } else null
 
-                    // Parameter ke-8 (index 7) adalah List<SystemShortcutInfo>
-                    val systemShortcuts = param.args[7] as? MutableList<Any>
+                    // Ambil daftar tombol shortcut yang akan ditampilkan ke layar
+                    var systemShortcuts = param.args[7] as? MutableList<Any>
 
-                    if (systemShortcuts != null && componentName != null) {
-                        val sysShortcutInfoClass = XposedHelpers.findClass(
-                            "com.transsion.xlauncher.popup.SystemShortcutInfo",
-                            lpparam.classLoader
-                        )
+                    if (systemShortcuts != null && systemShortcuts.isNotEmpty() && componentName != null) {
+                        
+                        // 1. Daftarkan Hook Pembajakan (Hanya Dieksekusi Sekali)
+                        if (!YamfShortcutManager.isHooked) {
+                            YamfShortcutManager.isHooked = true
+                            
+                            val sysClass = XposedHelpers.findClass("com.transsion.xlauncher.popup.SystemShortcutInfo", lpparam.classLoader)
+                            val mClass = XposedHelpers.findClass("com.transsion.xlauncher.popup.SystemShortcutInfo\$m", lpparam.classLoader)
 
-                        // Buat sub-kelas anonym dari SystemShortcutInfo milik Transsion
-                        val yamfShortcut = Proxy.newProxyInstance(
-                            lpparam.classLoader,
-                            arrayOf(sysShortcutInfoClass)
-                        ) { _, method, args ->
-                            when (method.name) {
-                                "b" -> "Open with YAMF" // Nama label tombol
-                                "e" -> { // Aksi saat tombol ditekan (onClick)
-                                    val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
-                                        setPackage("android")
-                                        putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
-                                        if (userId != null) putExtra(YAMFManager.EXTRA_USER_ID, userId)
-                                        putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_POPUP)
+                            // Bajak Teks Label
+                            XposedBridge.hookAllMethods(sysClass, "b", object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    if (YamfShortcutManager.yamfShortcuts.containsKey(param.thisObject)) {
+                                        param.result = "Open with YAMF"
                                     }
-                                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
-                                    true
                                 }
-                                else -> null
-                            }
+                            })
+
+                            // Bajak Ikon Drawable (Menggunakan Ikon Bawaan Android agar aman)
+                            XposedBridge.hookAllMethods(sysClass, "a", object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    if (YamfShortcutManager.yamfShortcuts.containsKey(param.thisObject)) {
+                                        val context = param.args[0] as android.content.Context
+                                        param.result = context.getDrawable(android.R.drawable.ic_menu_slideshow)
+                                    }
+                                }
+                            })
+
+                            // Bajak Eksekusi Aksi Klik (metode 'c')
+                            XposedBridge.hookAllMethods(sysClass, "c", object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    val appData = YamfShortcutManager.yamfShortcuts[param.thisObject]
+                                    if (appData != null) {
+                                        try {
+                                            if (mClass.isInterface) {
+                                                param.result = java.lang.reflect.Proxy.newProxyInstance(lpparam.classLoader, arrayOf(mClass)) { _, method, _ ->
+                                                    if (method.name == "onClick" || method.name == "a") YamfShortcutManager.triggerYamf(appData)
+                                                    null
+                                                }
+                                            } else {
+                                                // Jika 'm' ternyata abstract class, gunakan Unsafe lagi!
+                                                val unsafeClass = Class.forName("sun.misc.Unsafe")
+                                                val unsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
+                                                val allocateInstance = unsafeClass.getMethod("allocateInstance", Class::class.java)
+
+                                                val mInstance = allocateInstance.invoke(unsafe, mClass)
+                                                YamfShortcutManager.yamfMInstances[mInstance] = appData
+                                                param.result = mInstance
+                                            }
+                                        } catch (e: Throwable) {
+                                            log(TAG, "Error handling click interface", e)
+                                        }
+                                    }
+                                }
+                            })
+
+                            // Tangkap klik murni jika 'm' adalah class
+                            XposedBridge.hookAllMethods(mClass, "onClick", object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    val appData = YamfShortcutManager.yamfMInstances[param.thisObject]
+                                    if (appData != null) {
+                                        YamfShortcutManager.triggerYamf(appData)
+                                        param.result = null
+                                    }
+                                }
+                            })
                         }
 
-                        systemShortcuts.add(yamfShortcut)
-                        log(TAG, "Berhasil menyuntikkan tombol YAMF ke Pop-up Transsion untuk: $componentName")
+                        // 2. Teknik Unsafe: Ciptakan tiruan tombol tanpa memanggil konstruktornya!
+                        val unsafeClass = Class.forName("sun.misc.Unsafe")
+                        val unsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
+                        val allocateInstance = unsafeClass.getMethod("allocateInstance", Class::class.java)
+
+                        // Jadikan tombol pertama di daftar (misal AppInfo) sebagai cetakan DNA
+                        val template = systemShortcuts[0]
+                        val yamfShortcut = allocateInstance.invoke(unsafe, template.javaClass)
+
+                        // Simpan data aplikasi ke dalam memori kita, lalu suntikkan ke UI Transsion
+                        YamfShortcutManager.yamfShortcuts[yamfShortcut] = YamfShortcutManager.AppData(componentName, userHandle)
+                        
+                        try {
+                            systemShortcuts.add(yamfShortcut)
+                        } catch (e: UnsupportedOperationException) {
+                            // Antisipasi jika list terkunci (Unmodifiable)
+                            systemShortcuts = java.util.ArrayList(systemShortcuts)
+                            systemShortcuts.add(yamfShortcut)
+                            param.args[7] = systemShortcuts
+                        }
+
+                        log(TAG, "Berhasil menyuntikkan tombol YAMF via Unsafe ke Pop-up: $componentName")
                     }
                 } catch (e: Throwable) {
                     log(TAG, "Gagal menyuntikkan tombol YAMF ke Pop-up Transsion", e)
