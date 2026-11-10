@@ -267,7 +267,6 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
-        private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
         log(TAG, "hooking Transsion custom popup ${lpparam.packageName}")
 
         val popupContainerClass = XposedHelpers.findClassIfExists(
