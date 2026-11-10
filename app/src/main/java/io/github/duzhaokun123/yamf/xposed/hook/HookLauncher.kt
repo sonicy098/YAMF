@@ -246,30 +246,69 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
-        log(TAG, "hooking popup ${lpparam.packageName}")
-//        loadClass("com.android.launcher3.Launcher")
-//            .findMethod { name == "getSupportedShortcuts" }
-//            .hookAfter {
-//                val r = (it.result as Stream<*>).toArray()
-//                it.result = Stream.of(*r, getOpenInYAMFSystemShortcutFactory(lpparam.classLoader))
-//            }
-        loadClass("com.android.launcher3.popup.SystemShortcut")
-            .findField { name == "INSTALL" }
-            .set(null, getOpenInYAMFSystemShortcutFactory(lpparam.classLoader))
-        loadClass("com.android.launcher3.popup.SystemShortcut")
-            .findAllMethods { true }
-            .hookBefore {
-                val thiz = it.thisObject
-                if (thiz !== proxyClass) return@hookBefore
-                handleProxyMethod(it)
+        log(TAG, "hooking Transsion custom popup ${lpparam.packageName}")
+
+        val popupContainerClass = XposedHelpers.findClassIfExists(
+            "com.transsion.xlauncher.popup.PopupContainer",
+            lpparam.classLoader
+        )
+
+        if (popupContainerClass == null) {
+            log(TAG, "Transsion PopupContainer class not found")
+            return
+        }
+
+        // Hook metode E(...) tempat daftar tombol SystemShortcutInfo dimasukkan
+        XposedBridge.hookAllMethods(popupContainerClass, "E", object : XC_MethodHook() {
+            @Suppress("UNCHECKED_CAST")
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                try {
+                    // Parameter ke-5 (index 4) adalah ComponentName aplikasi
+                    val componentName = param.args[4] as? ComponentName
+                    // Parameter ke-3 (index 2) adalah ItemInfo (d5) untuk mengambil userId
+                    val itemInfo = param.args[2]
+                    val userId = if (itemInfo != null) {
+                        runCatching { XposedHelpers.getObjectField(itemInfo, "user") as? UserHandle }.getOrNull()
+                    } else null
+
+                    // Parameter ke-8 (index 7) adalah List<SystemShortcutInfo>
+                    val systemShortcuts = param.args[7] as? MutableList<Any>
+
+                    if (systemShortcuts != null && componentName != null) {
+                        val sysShortcutInfoClass = XposedHelpers.findClass(
+                            "com.transsion.xlauncher.popup.SystemShortcutInfo",
+                            lpparam.classLoader
+                        )
+
+                        // Buat sub-kelas anonym dari SystemShortcutInfo milik Transsion
+                        val yamfShortcut = Proxy.newProxyInstance(
+                            lpparam.classLoader,
+                            arrayOf(sysShortcutInfoClass)
+                        ) { _, method, args ->
+                            when (method.name) {
+                                "b" -> "Open with YAMF" // Nama label tombol
+                                "e" -> { // Aksi saat tombol ditekan (onClick)
+                                    val intent = Intent(YAMFManager.ACTION_OPEN_APP).apply {
+                                        setPackage("android")
+                                        putExtra(YAMFManager.EXTRA_COMPONENT_NAME, componentName)
+                                        if (userId != null) putExtra(YAMFManager.EXTRA_USER_ID, userId)
+                                        putExtra(YAMFManager.EXTRA_SOURCE, YAMFManager.SOURCE_POPUP)
+                                    }
+                                    AndroidAppHelper.currentApplication().sendBroadcast(intent)
+                                    true
+                                }
+                                else -> null
+                            }
+                        }
+
+                        systemShortcuts.add(yamfShortcut)
+                        log(TAG, "Berhasil menyuntikkan tombol YAMF ke Pop-up Transsion untuk: $componentName")
+                    }
+                } catch (e: Throwable) {
+                    log(TAG, "Gagal menyuntikkan tombol YAMF ke Pop-up Transsion", e)
+                }
             }
-        loadClass("com.android.launcher3.popup.SystemShortcut\$Install")
-            .findAllMethods { true }
-            .hookBefore {
-                val thiz = it.thisObject
-                if (thiz !== proxyClass) return@hookBefore
-                handleProxyMethod(it)
-            }
+        })
     }
 
     fun getOpenInYAMFSystemShortcutFactory(classLoader: ClassLoader): Any {
