@@ -248,9 +248,10 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     // Objek penyimpan identitas tombol YAMF buatan kita
     object YamfShortcutManager {
         var isHooked = false
-        // Menyimpan objek klon khusus YAMF
         val yamfShortcutObjects = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Any, Boolean>())
         val yamfAppData = java.util.concurrent.ConcurrentHashMap<Any, AppData>()
+        val yamfHandlerObjects = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Any, Boolean>())
+        val yamfHandlerData = java.util.concurrent.ConcurrentHashMap<Any, AppData>()
 
         class AppData(val componentName: ComponentName, val userHandle: UserHandle?)
 
@@ -268,7 +269,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private fun hookPopup(lpparam: XC_LoadPackage.LoadPackageParam) {
-        log(TAG, "hooking Transsion custom popup safely ${lpparam.packageName}")
+        log(TAG, "hooking Transsion custom popup click handler ${lpparam.packageName}")
 
         val popupContainerClass = XposedHelpers.findClassIfExists(
             "com.transsion.xlauncher.popup.PopupContainer",
@@ -291,13 +292,13 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                         val template = systemShortcuts[0]
                         val concreteClass = template.javaClass
 
-                        // 1. DAFTARKAN HOOK GLOBAL (Hanya sekali)
                         if (!YamfShortcutManager.isHooked) {
                             YamfShortcutManager.isHooked = true
                             
                             val sysClass = XposedHelpers.findClass("com.transsion.xlauncher.popup.SystemShortcutInfo", lpparam.classLoader)
+                            val mClass = XposedHelpers.findClassIfExists("com.transsion.xlauncher.popup.SystemShortcutInfo\$m", lpparam.classLoader)
 
-                            // Bajak Teks Label HANYA jika objek tersebut milik YAMF
+                            // 1. Bajak Label HANYA untuk objek YAMF
                             XposedBridge.hookAllMethods(sysClass, "b", object : XC_MethodHook() {
                                 override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
                                     if (YamfShortcutManager.yamfShortcutObjects.contains(param.thisObject)) {
@@ -306,7 +307,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 }
                             })
 
-                            // Bajak Ikon Drawable HANYA jika objek tersebut milik YAMF
+                            // 2. Bajak Ikon HANYA untuk objek YAMF
                             XposedBridge.hookAllMethods(sysClass, "a", object : XC_MethodHook() {
                                 override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
                                     if (YamfShortcutManager.yamfShortcutObjects.contains(param.thisObject)) {
@@ -316,41 +317,53 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 }
                             })
 
-                            // Bajak Eksekusi c(...) HANYA jika objek tersebut milik YAMF
+                            // 3. Bajak c(...) saat RENDER MENU: kembalikan handler asli bawaan template tapi catat identitasnya
                             XposedBridge.hookAllMethods(concreteClass, "c", object : XC_MethodHook() {
-                                override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                                override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
                                     if (YamfShortcutManager.yamfShortcutObjects.contains(param.thisObject)) {
                                         val appData = YamfShortcutManager.yamfAppData[param.thisObject]
-                                        if (appData != null) {
-                                            YamfShortcutManager.triggerYamf(appData)
+                                        val handlerInstance = param.result
+                                        if (appData != null && handlerInstance != null) {
+                                            // Tandai objek handler (m) ini milik YAMF
+                                            YamfShortcutManager.yamfHandlerObjects.add(handlerInstance)
+                                            YamfShortcutManager.yamfHandlerData[handlerInstance] = appData
                                         }
-                                        // Cegah eksekusi bawaan tombol template (agar tidak membuka App Info bawaan)
-                                        param.result = null
                                     }
                                 }
                             })
+
+                            // 4. Bajak EKSEKUSI KLIK: Hanya saat handler disentuh oleh pengguna di layar
+                            if (mClass != null) {
+                                XposedBridge.hookAllMethods(mClass, "onClick", object : XC_MethodHook() {
+                                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                                        if (YamfShortcutManager.yamfHandlerObjects.contains(param.thisObject)) {
+                                            val appData = YamfShortcutManager.yamfHandlerData[param.thisObject]
+                                            if (appData != null) {
+                                                YamfShortcutManager.triggerYamf(appData)
+                                            }
+                                            // Batalkan aksi App Info bawaan
+                                            param.result = null
+                                        }
+                                    }
+                                })
+                            }
                         }
 
-                        // 2. DUPLIKASI OBJEK SECARA AMAN (Tanpa Unsafe, Variabel Terisi Sempurna)
+                        // Duplikasi aman dari template bawaan Transsion
                         val clonedShortcut = runCatching {
-                            // Mencari method clone() jika ada
                             XposedHelpers.callMethod(template, "clone")
                         }.getOrElse {
-                            // Jika tidak ada method clone, buat objek baru melalui refleksi copy instance dasar
-                            val fields = concreteClass.declaredFields
                             val newInst = XposedHelpers.newInstance(concreteClass, *extractConstructorArgs(template))
-                            fields.forEach { field ->
+                            concreteClass.declaredFields.forEach { field ->
                                 field.isAccessible = true
                                 field.set(newInst, field.get(template))
                             }
                             newInst
                         }
 
-                        // Tandai objek ini sebagai objek YAMF
                         YamfShortcutManager.yamfShortcutObjects.add(clonedShortcut)
                         YamfShortcutManager.yamfAppData[clonedShortcut] = YamfShortcutManager.AppData(componentName, userHandle)
 
-                        // Masukkan ke daftar menu UI Transsion
                         try {
                             systemShortcuts.add(clonedShortcut)
                         } catch (e: UnsupportedOperationException) {
@@ -359,7 +372,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                             param.args[7] = systemShortcuts
                         }
 
-                        log(TAG, "Berhasil menyuntikkan tombol YAMF aman ke Pop-up: $componentName")
+                        log(TAG, "Menyuntikkan YAMF Popup Handler: $componentName")
                     }
                 } catch (e: Throwable) {
                     log(TAG, "Gagal menyuntikkan tombol YAMF ke Pop-up Transsion", e)
