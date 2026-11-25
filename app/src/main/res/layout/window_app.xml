@@ -6,6 +6,7 @@
     android:layout_height="wrap_content">
 
     <FrameLayout
+        android:id="@+id/fl_window_content"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:clipToPadding="false"
@@ -128,11 +129,23 @@
                         android:layout_height="wrap_content"
                         android:layout_centerVertical="true"
                         android:layout_marginStart="2dp"
-                        android:layout_toStartOf="@id/ib_close"
+                        android:layout_toStartOf="@id/ib_minimize"
                         android:layout_toEndOf="@id/iv_icon"
                         android:maxLines="1"
                         android:text="name"
                         android:textAppearance="?textAppearanceTitleSmall" />
+
+                    <ImageButton
+                        android:id="@+id/ib_minimize"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_centerVertical="true"
+                        android:layout_marginEnd="2dp"
+                        android:layout_toStartOf="@id/ib_close"
+                        android:background="?android:attr/selectableItemBackground"
+                        android:contentDescription="@string/minimize_desc"
+                        android:src="@drawable/ic_minimize_24"
+                        android:tint="?colorOnPrimaryContainer" />
 
                     <ImageButton
                         android:id="@+id/ib_close"
@@ -172,5 +185,17 @@
             android:layout_height="300dp"
             android:layout_marginTop="28dp" />
     </FrameLayout>
+
+    <ImageView
+        android:id="@+id/iv_minimized_icon"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:background="@drawable/bg_window_minimized"
+        android:contentDescription="@string/restore_desc"
+        android:elevation="8dp"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_android_black_24dp"
+        android:visibility="gone" />
 
 </FrameLayout>

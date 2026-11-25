@@ -98,29 +98,37 @@ object YAMFManager : IYAMFManager.Stub() {
         log(TAG, "config: $config")
     }
 
-    fun addWindow(id: Int) {
-        windowList.add(0, id)
-        openWindowCount++
+    private fun updateOpenWindowCount() {
+        openWindowCount = windowList.size
         val toRemove = mutableSetOf<IOpenCountListener>()
         iOpenCountListenerSet.forEach {
             runCatching {
                 it.onUpdate(openWindowCount)
-            }.onFailure { _ ->
+            }.onFailure {
                 toRemove.add(it)
             }
         }
         iOpenCountListenerSet.removeAll(toRemove)
     }
 
-    fun removeWindow(id: Int) {
-        windowList.remove(id)
-    }
-
-    fun isTop(id: Int) = windowList[0] == id
-
-    fun moveToTop(id: Int) {
+    fun addWindow(id: Int) {
         windowList.remove(id)
         windowList.add(0, id)
+        updateOpenWindowCount()
+    }
+
+    fun removeWindow(id: Int) {
+        if (windowList.remove(id)) {
+            updateOpenWindowCount()
+        }
+    }
+
+    fun isTop(id: Int) = windowList.firstOrNull() == id
+
+    fun moveToTop(id: Int) {
+        if (windowList.remove(id)) {
+            windowList.add(0, id)
+        }
     }
 
     fun createWindow(startCmd: StartCmd?) {

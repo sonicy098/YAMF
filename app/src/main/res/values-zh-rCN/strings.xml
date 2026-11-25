@@ -18,6 +18,8 @@
     <string name="rotate_desc">点击: 转屏\n长按: 锁定/解锁 自动转屏</string>
     <string name="fullscreen_desc">点击: 全屏\n长按: 挂起, 双击恢复</string>
     <string name="close_desc">点击: 关闭\n长按: 应用列表</string>
+    <string name="minimize_desc">最小化窗口</string>
+    <string name="restore_desc">恢复窗口</string>
     <string name="xposeddescription">为类原生系统设计的小窗</string>
     <string name="info_system_version">系统版本</string>
     <string name="open_with_yamf">使用 YAMF 打开</string>

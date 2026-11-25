@@ -32,6 +32,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.WindowManagerHidden
 import android.view.inputmethod.InputMethodManager
@@ -62,6 +63,7 @@ import io.github.duzhaokun123.yamf.xposed.utils.TipUtil
 import io.github.duzhaokun123.yamf.xposed.utils.dpToPx
 import io.github.duzhaokun123.yamf.xposed.utils.getActivityInfoCompat
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.sign
 
 @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
@@ -81,6 +83,10 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
     var displayId = -1
     var rotateLock = false
     var isMini = false
+    private var isIconMinimized = false
+    @Volatile private var hasHostedTask = false
+    @Volatile private var emptyDisplayCheckPending = false
+    @Volatile private var destroyed = false
     var halfWidth = 0
     var halfHeight = 0
     lateinit var surfaceView: View
@@ -268,7 +274,64 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
             true
         }
         binding.ibClose.setOnClickListener {
-            onDestroy()
+            closeCurrentTask()
+        }
+        binding.ibMinimize.setOnClickListener {
+            minimizeToIcon()
+        }
+        binding.ivMinimizedIcon.setOnClickListener {
+            restoreFromIcon()
+        }
+
+        var miniStartRawX = 0F
+        var miniStartRawY = 0F
+        var miniStartWindowX = 0
+        var miniStartWindowY = 0
+        var miniDragged = false
+        val miniTouchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        binding.ivMinimizedIcon.setOnTouchListener { view, event ->
+            val params = binding.root.layoutParams as WindowManager.LayoutParams
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    miniStartRawX = event.rawX
+                    miniStartRawY = event.rawY
+                    miniStartWindowX = params.x
+                    miniStartWindowY = params.y
+                    miniDragged = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - miniStartRawX
+                    val dy = event.rawY - miniStartRawY
+                    if (!miniDragged && (abs(dx) > miniTouchSlop || abs(dy) > miniTouchSlop)) {
+                        miniDragged = true
+                    }
+                    if (miniDragged) {
+                        val display = context.display
+                        val screenWidth = display?.width ?: context.resources.displayMetrics.widthPixels
+                        val screenHeight = display?.height ?: context.resources.displayMetrics.heightPixels
+                        params.x = (miniStartWindowX + dx.toInt()).coerceIn(
+                            0,
+                            (screenWidth - binding.ivMinimizedIcon.width).coerceAtLeast(0)
+                        )
+                        params.y = (miniStartWindowY + dy.toInt()).coerceIn(
+                            0,
+                            (screenHeight - binding.ivMinimizedIcon.height).coerceAtLeast(0)
+                        )
+                        Instances.windowManager.updateViewLayout(binding.root, params)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (miniDragged) {
+                        if (!YAMFManager.isTop(displayId)) moveToTop()
+                    } else {
+                        view.performClick()
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    // Keep the icon minimized if the gesture is interrupted.
+                }
+            }
+            true
         }
         binding.ibClose.setOnLongClickListener {
             AppListWindow(context, displayId)
@@ -281,7 +344,9 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
                 if (t is Error) throw t
                 TipUtil.showToast("${t.message}")
             }?.onSuccess {
-                binding.ibClose.callOnClick()
+                // The task has moved to the main display. Remove only this YAMF window;
+                // do not route through the Close button, which now removes the task.
+                onDestroy()
             }
         }
         binding.ibFullscreen.setOnLongClickListener {
@@ -336,13 +401,113 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         onVirtualDisplayCreated(displayId)
     }
 
+    /**
+     * Close every root task hosted by this window's virtual display.
+     * A failed removeTask call leaves the window alive so the app is not stranded
+     * on an invisible display.
+     */
+    private fun closeCurrentTask() {
+        if (destroyed) return
+
+        val tasks = runCatching {
+            Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId)
+        }.getOrElse { error ->
+            Log.e(TAG, "closeCurrentTask: unable to read tasks on display $displayId", error)
+            TipUtil.showToast("can't close application")
+            return
+        }
+
+        if (tasks.isEmpty()) {
+            onDestroy()
+            return
+        }
+
+        val failedTaskIds = tasks.mapNotNull { task ->
+            val removed = runCatching {
+                Instances.activityTaskManager.removeTask(task.taskId)
+            }.onFailure { error ->
+                Log.e(TAG, "closeCurrentTask: failed to remove task ${task.taskId}", error)
+            }.getOrDefault(false)
+            if (removed) null else task.taskId
+        }
+
+        if (failedTaskIds.isNotEmpty()) {
+            Log.w(TAG, "closeCurrentTask: task removal failed: $failedTaskIds")
+            TipUtil.showToast("can't close application")
+            scheduleEmptyDisplayCheck()
+            return
+        }
+
+        onDestroy()
+    }
+
+    /** Hide the full window while keeping its virtual display and app task alive. */
+    private fun minimizeToIcon() {
+        if (destroyed || isIconMinimized) return
+
+        val appIcon = binding.ivIcon.drawable
+        binding.ivMinimizedIcon.setImageDrawable(
+            appIcon?.constantState?.newDrawable(context.resources)?.mutate() ?: appIcon
+        )
+        binding.flWindowContent.visibility = View.GONE
+        binding.ivMinimizedIcon.visibility = View.VISIBLE
+        isIconMinimized = true
+
+        val params = binding.root.layoutParams as WindowManager.LayoutParams
+        val screenWidth = context.display?.width ?: context.resources.displayMetrics.widthPixels
+        val screenHeight = context.display?.height ?: context.resources.displayMetrics.heightPixels
+        val iconSize = 56.dpToPx().toInt()
+        params.x = params.x.coerceIn(0, (screenWidth - iconSize).coerceAtLeast(0))
+        params.y = params.y.coerceIn(0, (screenHeight - iconSize).coerceAtLeast(0))
+        Instances.windowManager.updateViewLayout(binding.root, params)
+    }
+
+    /** Restore the previous window without recreating its virtual display. */
+    private fun restoreFromIcon() {
+        if (destroyed || !isIconMinimized) return
+        isIconMinimized = false
+        binding.ivMinimizedIcon.visibility = View.GONE
+        binding.flWindowContent.visibility = View.VISIBLE
+        Instances.windowManager.updateViewLayout(binding.root, binding.root.layoutParams)
+        if (!YAMFManager.isTop(displayId)) moveToTop()
+    }
+
+    /**
+     * Re-check the task list after display/task transitions settle. A window is
+     * destroyed only after it has hosted a task and its virtual display is empty.
+     */
+    @Synchronized
+    private fun scheduleEmptyDisplayCheck() {
+        if (destroyed || emptyDisplayCheckPending) return
+        emptyDisplayCheckPending = true
+        RunMainThreadQueue.add {
+            delay(400)
+            emptyDisplayCheckPending = false
+            if (destroyed) return@add
+
+            val tasks = runCatching {
+                Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId)
+            }.onFailure { error ->
+                Log.w(TAG, "scheduleEmptyDisplayCheck: unable to inspect display $displayId", error)
+            }.getOrNull() ?: return@add
+
+            if (tasks.isNotEmpty()) {
+                hasHostedTask = true
+            } else if (hasHostedTask) {
+                onDestroy()
+            }
+        }
+    }
+
     private fun onDestroy() {
-        context.unregisterReceiver(broadcastReceiver)
-        Instances.iWindowManager.removeRotationWatcher(rotationWatcher)
-        Instances.activityTaskManager.unregisterTaskStackListener(taskStackListener)
-        YAMFManager.removeWindow(displayId)
-        virtualDisplay.release()
-        Instances.windowManager.removeView(binding.root)
+        if (destroyed) return
+        destroyed = true
+        runCatching { context.unregisterReceiver(broadcastReceiver) }
+        runCatching { Instances.iWindowManager.removeRotationWatcher(rotationWatcher) }
+        runCatching { Instances.activityTaskManager.unregisterTaskStackListener(taskStackListener) }
+        runCatching { YAMFManager.removeWindow(displayId) }
+        runCatching { virtualDisplay.release() }
+        runCatching { Instances.windowManager.removeView(binding.root) }
     }
 
     private fun getTopRootTask(): ActivityTaskManager.RootTaskInfo? {
@@ -378,6 +543,12 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
                 isClipEnabled = true
                 radius = 100
             })
+            if (isIconMinimized) {
+                val appIcon = binding.ivIcon.drawable
+                binding.ivMinimizedIcon.setImageDrawable(
+                    appIcon?.constantState?.newDrawable(context.resources)?.mutate() ?: appIcon
+                )
+            }
             binding.tvLabel.text = taskDescription.label ?: activityInfo.loadLabel(Instances.packageManager)
             if (BuildConfig.DEBUG) {
                 binding.tvLabel.text = "(${taskInfo.taskId}-$displayId) ${binding.tvLabel.text}"
@@ -395,6 +566,7 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
                 }
                 binding.tvLabel.setTextColor(onStateBar)
                 binding.ibClose.imageTintList = ColorStateList.valueOf(onStateBar)
+                binding.ibMinimize.imageTintList = ColorStateList.valueOf(onStateBar)
 
                 val navigationBarColor = taskDescription.navigationBarColor
                 binding.rlButton.setBackgroundColor(navigationBarColor)
@@ -412,7 +584,9 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
     }
 
     inner class TaskStackListener : ITaskStackListener.Stub() {
-        override fun onTaskStackChanged() {}
+        override fun onTaskStackChanged() {
+            scheduleEmptyDisplayCheck()
+        }
         override fun onActivityPinned(packageName: String?, userId: Int, taskId: Int, stackId: Int) {}
         override fun onActivityUnpinned() {}
         override fun onActivityRestartAttempt(task: ActivityManager.RunningTaskInfo?, homeTaskVisible: Boolean, clearedTask: Boolean, wasVisible: Boolean) {}
@@ -421,14 +595,18 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         override fun onActivityLaunchOnSecondaryDisplayFailed(taskInfo: ActivityManager.RunningTaskInfo?, requestedDisplayId: Int) {}
         override fun onActivityLaunchOnSecondaryDisplayRerouted(taskInfo: ActivityManager.RunningTaskInfo?, requestedDisplayId: Int) {}
         override fun onTaskCreated(taskId: Int, componentName: ComponentName?) {}
-        override fun onTaskRemoved(taskId: Int) {}
+        override fun onTaskRemoved(taskId: Int) {
+            scheduleEmptyDisplayCheck()
+        }
         override fun onTaskMovedToFront(taskInfo: ActivityManager.RunningTaskInfo) {
             if (taskInfo.getObject("displayId") == displayId) {
+                hasHostedTask = true
                 updateTask(taskInfo)
             }
         }
         override fun onTaskDescriptionChanged(taskInfo: ActivityManager.RunningTaskInfo) {
             if (taskInfo.getObject("displayId") == displayId) {
+                hasHostedTask = true
                 if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2 && !taskInfo.isVisible){
                     return
                 }
@@ -436,13 +614,24 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
             }
         }
         override fun onActivityRequestedOrientationChanged(taskId: Int, requestedOrientation: Int) {}
-        override fun onTaskRemovalStarted(taskInfo: ActivityManager.RunningTaskInfo?) {}
+        override fun onTaskRemovalStarted(taskInfo: ActivityManager.RunningTaskInfo?) {
+            if (taskInfo?.getObject("displayId") == displayId) {
+                scheduleEmptyDisplayCheck()
+            }
+        }
 //        override fun onTaskProfileLocked(taskInfo: ActivityManager.RunningTaskInfo?, userId: Int) {}
 
         override fun onTaskProfileLocked(taskInfo: ActivityManager.RunningTaskInfo?) {}
         override fun onTaskSnapshotChanged(taskId: Int, snapshot: TaskSnapshot?) {}
         override fun onBackPressedOnTaskRoot(taskInfo: ActivityManager.RunningTaskInfo?) {}
-        override fun onTaskDisplayChanged(taskId: Int, newDisplayId: Int) {}
+        override fun onTaskDisplayChanged(taskId: Int, newDisplayId: Int) {
+            if (newDisplayId == displayId) {
+                hasHostedTask = true
+            }
+            // For the old display this will find no remaining task and clean up
+            // its now-empty overlay and virtual display.
+            scheduleEmptyDisplayCheck()
+        }
         override fun onRecentTaskListUpdated() {}
         override fun onRecentTaskListFrozenChanged(frozen: Boolean) {}
         override fun onTaskFocusChanged(taskId: Int, focused: Boolean) {}
