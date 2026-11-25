@@ -492,7 +492,7 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         topActivity: ComponentName?
     ): Boolean {
         val activityType = runCatching {
-            taskInfo.getObject<Int>("topActivityType")
+            taskInfo.getObject("topActivityType") as? Int
         }.getOrNull()
         val className = topActivity?.className.orEmpty()
         return activityType == ACTIVITY_TYPE_HOME ||
@@ -513,7 +513,7 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
                         TAG,
                         "ignoring secondary-home task ${task.taskId}: " +
                             "${task.topActivity} (activityType=" +
-                            runCatching { task.getObject<Int>("topActivityType") }.getOrNull() + ")"
+                            runCatching { task.getObject("topActivityType") as? Int }.getOrNull() + ")"
                     )
                     false
                 } else {
