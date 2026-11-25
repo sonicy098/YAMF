@@ -477,28 +477,57 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
     }
 
     /**
-     * Re-check the task list after display/task transitions settle. A window is
-     * destroyed only after it has hosted a task and its virtual display is empty.
+     * RootTaskInfo lists can contain empty root containers after the last activity
+     * has moved to another display. Do not treat those containers as live app tasks.
+     * A real task must still have a running activity and a non-null top activity.
+     */
+    private fun getActiveRootTasks(): List<ActivityTaskManager.RootTaskInfo>? {
+        return runCatching {
+            Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId).filter { task ->
+                task.isRunning &&
+                    task.numActivities > 0 &&
+                    task.topActivity != null &&
+                    task.childTaskIds.isNotEmpty()
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "getActiveRootTasks: unable to inspect display $displayId", error)
+        }.getOrNull()
+    }
+
+    /**
+     * Re-check the task list after display/task transitions settle. Require two
+     * consecutive empty snapshots so a short reparent/launch transition cannot
+     * destroy a window that is still acquiring its task.
      */
     @Synchronized
     private fun scheduleEmptyDisplayCheck() {
         if (destroyed || emptyDisplayCheckPending) return
         emptyDisplayCheckPending = true
         RunMainThreadQueue.add {
-            delay(400)
-            emptyDisplayCheckPending = false
-            if (destroyed) return@add
+            try {
+                delay(500)
+                if (destroyed) return@add
 
-            val tasks = runCatching {
-                Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId)
-            }.onFailure { error ->
-                Log.w(TAG, "scheduleEmptyDisplayCheck: unable to inspect display $displayId", error)
-            }.getOrNull() ?: return@add
+                val firstCheck = getActiveRootTasks() ?: return@add
+                if (firstCheck.isNotEmpty()) {
+                    hasHostedTask = true
+                    Log.d(TAG, "display $displayId still hosts tasks: ${firstCheck.map { it.taskId }}")
+                    return@add
+                }
 
-            if (tasks.isNotEmpty()) {
-                hasHostedTask = true
-            } else if (hasHostedTask) {
-                onDestroy()
+                if (hasHostedTask) {
+                    delay(250)
+                    if (destroyed) return@add
+                    val confirmation = getActiveRootTasks() ?: return@add
+                    if (confirmation.isEmpty()) {
+                        Log.i(TAG, "display $displayId has no running activities; removing stale window")
+                        onDestroy()
+                    } else {
+                        Log.d(TAG, "display $displayId received tasks during cleanup confirmation: ${confirmation.map { it.taskId }}")
+                    }
+                }
+            } finally {
+                emptyDisplayCheckPending = false
             }
         }
     }
@@ -597,7 +626,12 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         override fun onActivityForcedResizable(packageName: String?, taskId: Int, reason: Int) {}
         override fun onActivityDismissingDockedTask() {}
         override fun onActivityLaunchOnSecondaryDisplayFailed(taskInfo: ActivityManager.RunningTaskInfo?, requestedDisplayId: Int) {}
-        override fun onActivityLaunchOnSecondaryDisplayRerouted(taskInfo: ActivityManager.RunningTaskInfo?, requestedDisplayId: Int) {}
+        override fun onActivityLaunchOnSecondaryDisplayRerouted(taskInfo: ActivityManager.RunningTaskInfo?, requestedDisplayId: Int) {
+            if (requestedDisplayId == displayId) {
+                Log.d(TAG, "launch rerouted away from display $displayId for task ${taskInfo?.taskId}")
+                scheduleEmptyDisplayCheck()
+            }
+        }
         override fun onTaskCreated(taskId: Int, componentName: ComponentName?) {}
         override fun onTaskRemoved(taskId: Int) {
             scheduleEmptyDisplayCheck()
@@ -636,12 +670,18 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
             // its now-empty overlay and virtual display.
             scheduleEmptyDisplayCheck()
         }
-        override fun onRecentTaskListUpdated() {}
+        override fun onRecentTaskListUpdated() {
+            scheduleEmptyDisplayCheck()
+        }
         override fun onRecentTaskListFrozenChanged(frozen: Boolean) {}
         override fun onTaskFocusChanged(taskId: Int, focused: Boolean) {}
         override fun onTaskRequestedOrientationChanged(taskId: Int, requestedOrientation: Int) {}
         override fun onActivityRotation(displayId: Int) {}
-        override fun onTaskMovedToBack(taskInfo: ActivityManager.RunningTaskInfo?) {}
+        override fun onTaskMovedToBack(taskInfo: ActivityManager.RunningTaskInfo?) {
+            if (taskInfo?.getObject("displayId") == displayId) {
+                scheduleEmptyDisplayCheck()
+            }
+        }
         override fun onLockTaskModeChanged(mode: Int) {}
     }
 
