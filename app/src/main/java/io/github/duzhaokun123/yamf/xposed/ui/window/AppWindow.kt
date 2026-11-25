@@ -72,6 +72,9 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
     companion object {
         const val TAG = "YAMF_AppWindow"
         const val ACTION_RESET_ALL_WINDOW = "io.github.duzhaokun123.yamf.ui.window.action.ACTION_RESET_ALL_WINDOW"
+
+        // WindowConfiguration.ACTIVITY_TYPE_HOME (Android framework value).
+        private const val ACTIVITY_TYPE_HOME = 2
     }
 
     lateinit var binding: WindowAppBinding
@@ -477,17 +480,48 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
     }
 
     /**
-     * RootTaskInfo lists can contain empty root containers after the last activity
-     * has moved to another display. Do not treat those containers as live app tasks.
-     * A real task must still have a running activity and a non-null top activity.
+     * The system creates a dedicated SECONDARY_HOME task on virtual displays
+     * with system decorations. It remains alive even when the user app has
+     * left the display, so it must not keep the YAMF app window alive.
+     *
+     * TaskInfo.topActivityType is hidden on this API level; read it through
+     * EzXHelper, with a component-name fallback for vendor framework variants.
+     */
+    private fun isSecondaryHomeTask(
+        taskInfo: Any,
+        topActivity: ComponentName?
+    ): Boolean {
+        val activityType = runCatching {
+            taskInfo.getObject<Int>("topActivityType")
+        }.getOrNull()
+        val className = topActivity?.className.orEmpty()
+        return activityType == ACTIVITY_TYPE_HOME ||
+            className.endsWith("SecondaryDisplayLauncher") ||
+            className.endsWith("SecondaryHomeActivity")
+    }
+
+    /**
+     * RootTaskInfo may contain system home/launcher tasks on a decorated
+     * virtual display. Only non-home application tasks count as hosted apps.
      */
     private fun getActiveRootTasks(): List<ActivityTaskManager.RootTaskInfo>? {
         return runCatching {
             Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId).filter { task ->
-                task.isRunning &&
-                    task.numActivities > 0 &&
-                    task.topActivity != null &&
-                    task.childTaskIds.isNotEmpty()
+                val isHomeTask = isSecondaryHomeTask(task, task.topActivity)
+                if (isHomeTask) {
+                    Log.d(
+                        TAG,
+                        "ignoring secondary-home task ${task.taskId}: " +
+                            "${task.topActivity} (activityType=" +
+                            runCatching { task.getObject<Int>("topActivityType") }.getOrNull() + ")"
+                    )
+                    false
+                } else {
+                    task.isRunning &&
+                        task.numActivities > 0 &&
+                        task.topActivity != null &&
+                        task.childTaskIds.isNotEmpty()
+                }
             }
         }.onFailure { error ->
             Log.w(TAG, "getActiveRootTasks: unable to inspect display $displayId", error)
@@ -638,12 +672,21 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         }
         override fun onTaskMovedToFront(taskInfo: ActivityManager.RunningTaskInfo) {
             if (taskInfo.getObject("displayId") == displayId) {
+                if (isSecondaryHomeTask(taskInfo, taskInfo.topActivity)) {
+                    Log.d(TAG, "secondary home moved to front on display $displayId; not marking it as app")
+                    scheduleEmptyDisplayCheck()
+                    return
+                }
                 hasHostedTask = true
                 updateTask(taskInfo)
             }
         }
         override fun onTaskDescriptionChanged(taskInfo: ActivityManager.RunningTaskInfo) {
             if (taskInfo.getObject("displayId") == displayId) {
+                if (isSecondaryHomeTask(taskInfo, taskInfo.topActivity)) {
+                    scheduleEmptyDisplayCheck()
+                    return
+                }
                 hasHostedTask = true
                 if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2 && !taskInfo.isVisible){
                     return
@@ -663,11 +706,10 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
         override fun onTaskSnapshotChanged(taskId: Int, snapshot: TaskSnapshot?) {}
         override fun onBackPressedOnTaskRoot(taskInfo: ActivityManager.RunningTaskInfo?) {}
         override fun onTaskDisplayChanged(taskId: Int, newDisplayId: Int) {
-            if (newDisplayId == displayId) {
-                hasHostedTask = true
-            }
-            // For the old display this will find no remaining task and clean up
-            // its now-empty overlay and virtual display.
+            // Do not mark the display as hosting an app here: this callback can
+            // also describe the system SECONDARY_HOME task. The next task query
+            // will mark hasHostedTask only when a non-home app task is present.
+            Log.d(TAG, "task $taskId changed display to $newDisplayId (window display=$displayId)")
             scheduleEmptyDisplayCheck()
         }
         override fun onRecentTaskListUpdated() {
