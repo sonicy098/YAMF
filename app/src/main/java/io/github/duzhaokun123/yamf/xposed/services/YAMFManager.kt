@@ -101,11 +101,11 @@ object YAMFManager : IYAMFManager.Stub() {
     private fun updateOpenWindowCount() {
         openWindowCount = windowList.size
         val toRemove = mutableSetOf<IOpenCountListener>()
-        iOpenCountListenerSet.forEach {
+        iOpenCountListenerSet.forEach { listener ->
             runCatching {
-                it.onUpdate(openWindowCount)
+                listener.onUpdate(openWindowCount)
             }.onFailure {
-                toRemove.add(it)
+                toRemove.add(listener)
             }
         }
         iOpenCountListenerSet.removeAll(toRemove)

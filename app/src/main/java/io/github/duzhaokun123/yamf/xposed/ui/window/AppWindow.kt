@@ -424,7 +424,11 @@ class AppWindow(val context: Context, private val densityDpi: Int, private val f
 
         val failedTaskIds = tasks.mapNotNull { task ->
             val removed = runCatching {
-                Instances.activityTaskManager.removeTask(task.taskId)
+                Instances.activityTaskManager.invokeMethod(
+                    "removeTask",
+                    args(task.taskId),
+                    argTypes(Integer.TYPE)
+                ) as? Boolean ?: false
             }.onFailure { error ->
                 Log.e(TAG, "closeCurrentTask: failed to remove task ${task.taskId}", error)
             }.getOrDefault(false)
